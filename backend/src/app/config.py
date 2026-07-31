@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     database_url: str = "sqlite+aiosqlite:///./data/incident_investigator.db"
 
+    # LLM provider used by the agent pipeline. "anthropic" or "gemini".
+    llm_provider: str = "anthropic"
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
+
 
 @lru_cache
 def get_settings() -> Settings:

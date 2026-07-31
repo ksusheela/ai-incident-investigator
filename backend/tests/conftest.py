@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 
@@ -15,10 +16,13 @@ def temp_database_url(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-async def client(
-    temp_database_url: str, monkeypatch: pytest.MonkeyPatch
-) -> AsyncGenerator[AsyncClient, None]:
-    """An httpx AsyncClient bound to the FastAPI app, using a temp SQLite DB."""
+def app(temp_database_url: str, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    """A fresh FastAPI app bound to a temp SQLite DB.
+
+    Exposed separately from `client` so tests can set
+    `app.dependency_overrides` (e.g. swapping in a fake LLM provider)
+    before issuing requests.
+    """
     monkeypatch.setenv("DATABASE_URL", temp_database_url)
     monkeypatch.setenv("APP_ENV", "test")
 
@@ -34,8 +38,12 @@ async def client(
 
     from app.main import create_app
 
-    app = create_app()
+    return create_app()
 
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncGenerator[AsyncClient, None]:
+    """An httpx AsyncClient bound to the `app` fixture."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:
         yield async_client

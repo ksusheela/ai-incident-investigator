@@ -19,14 +19,63 @@ As of the backend-foundation work, these layers have real code in them:
 - **`app/database.py`** — the async SQLAlchemy engine, session factory, and the `get_db_session()` FastAPI dependency that hands each request its own session.
 - **`app/logging_config.py`** — structured logging configuration, applied once at app startup.
 - **`app/infrastructure/database/base.py`** — the SQLAlchemy `DeclarativeBase` every ORM model will inherit from. It exists now (with zero models yet) because Alembic's autogenerate needs `Base.metadata` to diff against — see "Database migrations" below. This is infrastructure wiring, not a domain model, so it lives in `infrastructure/`, not `domain/`.
+- **`app/infrastructure/llm/`**, **`app/agents/`**, **`app/services/investigation_service.py`**, **`app/api/investigations.py`** — the LangGraph multi-agent orchestrator. See "Multi-agent orchestration (LangGraph)" below.
 
-Everything else in the full layout (`domain/`, `services/`, `agents/`, `guardrails/`, `evaluation/`, `frontend/`, etc.) is scaffolded but empty — see "Full project layout" below for what each folder is for and which feature is expected to populate it.
+Still empty: `domain/`, `guardrails/`, `evaluation/`, `agents/skills/`, `infrastructure/mcp/` — see "Full project layout" below for what each is for and which feature is expected to populate it.
 
 Application/use-case logic sits between `api/` and `domain/`+`infrastructure/`, invoked from routers via constructor/parameter injection — see "Dependency injection" below.
 
 ## Dependency injection
 
 FastAPI's built-in `Depends()` system is used directly rather than a separate DI container/framework. At this project's scale that's the idiomatic, lowest-friction choice: dependencies (DB sessions, settings, and later, repositories and LLM clients) are declared as constructor/parameter dependencies and FastAPI resolves them per-request. This keeps route handlers thin and testable — tests override dependencies (e.g. swap the DB session for one bound to a temp SQLite file) via fixtures instead of monkeypatching internals.
+
+## Multi-agent orchestration (LangGraph)
+
+`POST /api/v1/investigations` (raw text) and `POST /api/v1/investigations/upload` (log file) both run the same five agents over log text, orchestrated by a LangGraph `StateGraph`. Each has an `/export` counterpart (`/investigations/export`, `/investigations/upload/export`) returning just the final report as a downloadable `.md` file instead of the full JSON state — see "Export endpoints" below.
+
+```text
+Monitoring Agent (rule-based, no LLM)
+      |
+(incident detected?) --no--> END
+      | yes
+Log Analysis Agent (rule-based, no LLM)
+      |
+Root Cause Agent (LLM)
+      |
+Recommendation Agent (LLM)
+      |
+Report Agent (LLM)
+      |
+     END
+```
+
+**Shared state** (`app/agents/state/investigation_state.py`) is a single Pydantic `InvestigationState` model threaded through every node — `logs` in, then each agent writes the field(s) it owns (`monitoring`, `log_analysis`, `root_cause`, `recommendations`, `report`) and never another agent's field. LangGraph node functions return a `dict` of just the fields they're updating; LangGraph merges it into the running state.
+
+**Monitoring and Log Analysis are both deterministic, not LLM-backed.** Monitoring (`monitoring_agent.py` + `log_parser.py`) classifies each log line by regex against common level markers (`CRITICAL`/`FATAL`/`ERROR`/`SEVERE`, `WARN`/`WARNING`, plus Python tracebacks), counts errors and warnings, and maps the counts to a `Severity` tier (`none`/`low`/`medium`/`high`/`critical`) via documented thresholds. Log Analysis (`log_analysis_agent.py` + `log_analyzer.py`) goes deeper over the same raw text: it extracts full Python stack traces (exception type, message, raw frames), groups error lines into `RepeatedFailure`s by a normalized signature (stripping timestamps and collapsing digits, so "timed out after 3013ms" and "timed out after 4502ms" are recognized as the same recurring failure rather than two unrelated ones), flags two concrete rule-based anomalies (an isolated CRITICAL/FATAL event, and a burst of `_BURST_MIN_ERRORS`+ errors within `_BURST_WINDOW_SECONDS`), and pulls out affected component names.
+
+This is a deliberate choice for both, not a shortcut: parsing, extraction, counting, and grouping are mechanical tasks regex and simple data structures handle reliably and cheaply — an LLM would be slower, costlier, and *worse* at exact counting for zero benefit. LLM reasoning is reserved for the three agents that actually need judgment — inferring a root cause, weighing recommendations, writing prose. A useful side effect: both agents are fully unit-testable (`tests/unit/test_log_parser.py`, `tests/unit/test_log_analyzer.py`) with no API key and no network access at all — 20 of this project's test cases exercise pipeline logic without ever needing an LLM.
+
+Log Analysis re-parses `state.logs` independently rather than reusing Monitoring's classification: `MonitoringResult` caps its sample lists at 20 entries each (for a bounded API response), but repeated-failure counting and anomaly detection need the *full* uncapped set. Re-running this cheap, pure parse is a deliberate trade-off against threading unbounded internal data through the public response schema.
+
+**Each LLM-backed agent is a factory, not a plain function**: `make_root_cause_agent(llm) -> node_fn` closes over an `LLMProvider` and returns the actual node function LangGraph calls with only `state`. This is how dependency injection reaches into LangGraph nodes despite LangGraph's node signature only accepting state — the *graph builder* (`build_investigation_graph(llm)`) is what's constructed with a dependency, not the individual nodes. Monitoring and Log Analysis have no such dependency and are wired in directly as plain functions.
+
+**Structured output, not free-text parsing — all three LLM agents, including Report.** Root Cause and Recommendation are prompted to respond with *only* a JSON object matching a specific schema, parsed via `json.loads` + the matching Pydantic model (`RootCauseResult`, `RecommendationResult`), raising a clear `AgentOutputError` (mapped to HTTP 502) if the model doesn't comply — never silently accepting malformed output. Report follows the same discipline, but its JSON schema (`ReportSections`) covers only `summary` and `next_steps` — the two pieces that genuinely need LLM-authored prose. It does **not** ask the LLM to restate Root Cause, Evidence, Confidence, or Recommendation, because that data already exists, already validated, from earlier stages; asking the LLM to reproduce it in prose would risk it contradicting itself (e.g. stating a different confidence figure than `confidence_score` actually holds) for no benefit. `report_renderer.py`'s `render_incident_report_markdown()` deterministically assembles the full six-section document — **Summary, Root Cause, Evidence, Confidence, Recommendation, Next Steps**, always in that order, always all six present — from the validated state plus the LLM's two fields. `categorize_confidence_label()` maps `confidence_score` to a High/Medium/Low label (thresholds at 0.8 and 0.5) shown alongside the raw percentage.
+
+**Root Cause is the one agent matched against a known-pattern catalog.** `agents/nodes/failure_patterns.py` is a small, curated list of common production-incident patterns (connection pool exhaustion, cascading timeout, resource exhaustion, null reference, deadlock/contention, configuration error, dependency outage, traffic spike), rendered into the system prompt. The agent's `matched_pattern` field must be one of those names or `null` — never a free-form guess — and the node validates that itself: a name outside the catalog raises `AgentOutputError` just like malformed JSON would, since a hallucinated pattern name is exactly the kind of malformed output the rest of the pipeline already refuses to accept silently. `confidence_score` is a `float` constrained to `[0.0, 1.0]` via a Pydantic `Field` (not a loose string like `"high"`), and `reasoning` is a required, separate field from `hypothesis` — the claim and the justification for it are distinct, both explicit in the schema, both fed forward into Recommendation and Report.
+
+**Recommendation groups fixes by category, each with its own rationale.** `RecommendationResult` has three required lists — `code_fixes`, `configuration_changes`, `database_improvements` — each a `Recommendation` (`description` + `rationale`), not a bare string. An empty list for a category is expected and correct (most incidents don't need a database change); the prompt explicitly tells the model not to pad a category just to fill it. What the node *does* reject: every category empty at once. A confirmed root cause with zero actionable recommendations across all three categories is itself a malformed response, so `recommendation_agent.py` raises `AgentOutputError` in that case — the same "fail loudly, don't paper over it" stance as the pattern-catalog check above.
+
+**The conditional edge after Monitoring is a real short-circuit, not decoration**: if the Monitoring Agent finds no errors, `_route_after_monitoring` routes straight to `END` — Log Analysis and the three LLM agents never run. This is the one place in the graph where control flow depends on a node's output rather than always proceeding to the next step, and it's the reason Monitoring being LLM-free matters practically, not just architecturally: an investigation of clean logs completes without needing an LLM configured at all (verified — see below).
+
+**Fail fast on misconfiguration, but lazily**: `infrastructure/llm/factory.py`'s `build_llm_provider()` raises `LLMConfigurationError` immediately if the selected provider's API key isn't set — but that construction is deferred by `_LazyLLMProvider` until the *first actual `complete()` call*, not at FastAPI dependency-resolution time. This matters because FastAPI resolves `Depends(get_llm_provider)` for every request regardless of whether the request will end up needing it; without the lazy wrapper, every request would fail with 503 the moment an LLM key is missing, even ones that short-circuit at Monitoring and never touch the LLM. `main.py` maps `LLMConfigurationError` to HTTP 503. Verified in this environment (no API key configured): a clean-log request returns `200` with a full triage result; a request whose logs contain real errors correctly runs both deterministic agents (confirmed via direct invocation — stack trace extracted, repeated failures grouped with correct counts, both anomaly rules fired) and then fails with a clear `503` only once Root Cause actually needs the LLM.
+
+**Two providers, one interface**: `LLMProvider` (`infrastructure/llm/provider.py`) is a `Protocol` with one method, `complete(system, prompt) -> str`. `AnthropicProvider` and `GeminiProvider` both implement it; `factory.get_llm_provider()` (cached, like `get_settings()`) selects between them via `Settings.llm_provider`. Neither adapter's real network path has been exercised in this environment — there's no API key configured here to test against — only the interface contract and the graph's orchestration logic (via a `FakeLLMProvider` test double) have been verified. Swapping providers, or pointing `GeminiProvider`'s model string at whatever Google's current model ID is at deploy time, requires no changes to any agent.
+
+**File upload**: `POST /api/v1/investigations/upload` accepts a log file (multipart, `UploadFile`), enforces a 5 MiB limit (`413`) and UTF-8 decoding (`400`), then delegates to the exact same `run_investigation()` used by the raw-text endpoint — no duplicated business logic, only the HTTP-specific input translation differs. That validation (`_read_uploaded_logs()`) is itself shared with the upload/export endpoint below, so both enforce identical limits.
+
+**Export endpoints**: `POST /api/v1/investigations/export` and `/investigations/upload/export` run the identical pipeline but return `Response(content=result.report, media_type="text/markdown", headers={"Content-Disposition": 'attachment; filename="incident-report.md"'})` instead of the JSON state — a real file download, for a human who wants the report itself rather than the underlying data. If Monitoring found no incident, `result.report` is `None` and the endpoint returns `422` ("no incident was detected, so there is no report to export") rather than a broken empty download.
+
+**Why this is stateless (no persistence yet)**: both endpoints take logs as input and return the final state in the response — neither reads from nor writes to the database. Wiring this to persisted `LogFile`/`Incident` domain entities is Feature 2 (log upload & storage), still pending; building that persistence layer now, before there was a pipeline to consume it, would have been exactly the kind of speculative abstraction this project avoids.
 
 ## Data & persistence
 
@@ -106,30 +155,30 @@ The complete enterprise folder skeleton (folders only — no implementation yet)
 ai-incident-investigator/
 ├── backend/                          FastAPI backend service — owns persistence + the agent pipeline
 │   ├── src/app/
-│   │   ├── api/                       [Feature 1, in use] HTTP layer: routers, request/response schemas
+│   │   ├── api/                       [in use] HTTP layer: routers, request/response schemas (health, investigations)
 │   │   ├── domain/                    [Feature 2] Framework-free business layer
 │   │   │   ├── entities/               Core business objects (e.g. LogFile, Incident) — plain Python/Pydantic, no ORM/HTTP imports
 │   │   │   ├── repositories/            Abstract repository interfaces (ports) that infrastructure/ implements
 │   │   │   └── exceptions/               Domain-level error types, independent of HTTP status codes
-│   │   ├── services/                  [Feature 2+] Application/use-case layer — orchestrates domain + infrastructure, called by API routers
-│   │   ├── infrastructure/            [Feature 2+] Concrete adapters implementing domain interfaces
+│   │   ├── services/                  [in use] `investigation_service.py` — builds the graph, runs it, returns the final state
+│   │   ├── infrastructure/            Concrete adapters implementing domain/external interfaces
 │   │   │   ├── database/                [in use] `base.py` (declarative Base); ORM models + repository implementations land in Feature 2
 │   │   │   │   └── migrations/           [in use] Alembic (async), wired to Base.metadata + Settings; no versions/ yet — first real migration lands with Feature 2's models
-│   │   │   ├── llm/                     Claude + Gemini client adapters behind a common provider interface
+│   │   │   ├── llm/                     [in use] `LLMProvider` Protocol + `AnthropicProvider`/`GeminiProvider` adapters + cached factory
 │   │   │   └── mcp/                     Model Context Protocol integration
 │   │   │       ├── client/               Consumes external MCP tool servers from within agents
 │   │   │       └── server/               Exposes this app's own capabilities as an MCP server to other tools
-│   │   ├── agents/                    [Feature 3+] Multi-agent architecture, orchestrated with LangGraph
-│   │   │   ├── graphs/                  LangGraph graph/workflow definitions wiring nodes together
-│   │   │   ├── nodes/                   Individual agent implementations (detector, root-cause analyzer, fix-suggester, reporter)
-│   │   │   ├── state/                   Shared graph state schemas passed between nodes
-│   │   │   ├── prompts/                 Prompt templates, one set per agent
-│   │   │   └── skills/                  Reusable Agent Skills — invokable capabilities/tools shared across multiple agents
+│   │   ├── agents/                    [in use] Multi-agent architecture, orchestrated with LangGraph — see "Multi-agent orchestration" above
+│   │   │   ├── graphs/                  [in use] `investigation_graph.py` — the compiled `StateGraph`
+│   │   │   ├── nodes/                   [in use] `monitoring_agent.py`+`log_parser.py` and `log_analysis_agent.py`+`log_analyzer.py` (both rule-based); `failure_patterns.py` (Root Cause's catalog); `report_renderer.py` (deterministic template); a factory per LLM agent: root_cause, recommendation, report
+│   │   │   ├── state/                   [in use] `InvestigationState` + per-agent result models
+│   │   │   ├── prompts/                 [in use] System/user prompt builders, one set per agent
+│   │   │   └── skills/                  Reusable Agent Skills — invokable capabilities/tools shared across multiple agents (still empty — no tool-calling yet)
 │   │   ├── guardrails/                [Feature 8] Input/output validation and safety checks wrapping LLM calls
 │   │   └── evaluation/                [Feature 9] DeepEval eval suites, metrics, and harness for agent output quality
 │   ├── tests/
-│   │   ├── unit/                       Tests for a single module in isolation (mocks at the boundary)
-│   │   ├── integration/                 Tests spanning modules (e.g. API -> service -> real test DB)
+│   │   ├── unit/                       [in use] `test_investigation_graph.py` — graph/node behavior via a fake LLM provider
+│   │   ├── integration/                 [in use] `test_investigations_api.py` — the real HTTP layer, LLM dependency overridden
 │   │   └── e2e/                          Full agent-pipeline runs against a running app instance
 │   ├── Dockerfile                     [in use] multi-stage: shared `base` -> `development` (uv sync w/ dev deps, --reload) / `production` (--no-dev, no reload)
 │   └── pyproject.toml                 [Feature 1, in use]
