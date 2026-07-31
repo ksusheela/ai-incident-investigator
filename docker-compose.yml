@@ -1,17 +1,32 @@
+# Development mode (the default: `docker compose up --build`).
+#
+# - Both services run with hot reload (uvicorn --reload / vite dev + HMR).
+# - Source directories are bind-mounted from the host so edits take effect
+#   without rebuilding the image.
+# - The SQLite file is bind-mounted straight to backend/data/ on the host
+#   (not a named volume) so it's visible/inspectable like a local `uv run`.
+#
+# For production, use docker-compose.prod.yml instead — see its header
+# comment and ARCHITECTURE.md -> "Containerization" for what differs and why.
+
 services:
   backend:
     build:
       context: ./backend
+      target: development
     ports:
       - "8000:8000"
     environment:
       APP_NAME: "AI Incident Investigator"
-      APP_ENV: docker
-      LOG_LEVEL: INFO
+      APP_ENV: local
+      LOG_LEVEL: DEBUG
       API_V1_PREFIX: /api/v1
       DATABASE_URL: sqlite+aiosqlite:///./data/incident_investigator.db
     volumes:
-      - backend_data:/app/data
+      - ./backend/src:/app/src
+      - ./backend/tests:/app/tests
+      - ./backend/alembic.ini:/app/alembic.ini
+      - ./backend/data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 10s
@@ -22,16 +37,19 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        # Baked into the static bundle at build time. Points at the
-        # backend's host-published port, since this is fetched from the
-        # browser on the host, not from inside the Docker network.
-        VITE_API_BASE_URL: http://localhost:8000/api/v1
+      target: development
     ports:
-      - "5173:8080"
+      - "5173:5173"
+    environment:
+      # Read at container start by `vite dev` (not baked in like the
+      # production build), so this can safely differ per environment
+      # without rebuilding the image.
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/tests:/app/tests
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
     depends_on:
       backend:
         condition: service_healthy
-
-volumes:
-  backend_data:

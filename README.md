@@ -6,7 +6,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for design decisions and [`docs/feature
 
 ## Status
 
-Backend foundation is in place: FastAPI + async SQLAlchemy/SQLite, Alembic migrations, OpenAPI docs, structured logging, and Docker. The frontend (React + TypeScript + Bootstrap 5, responsive sidebar layout, Dashboard/Incidents/Reports/Settings pages) is also built, ahead of its original roadmap slot. See [`docs/features/`](docs/features/) for the full build log. The remaining target folder structure (agents, domain, MCP, guardrails, evaluation) is scaffolded but not yet implemented — see `ARCHITECTURE.md` for what's real vs. planned, including which frontend pages call backend endpoints that don't exist yet and why that's intentional rather than a bug.
+Backend foundation is in place: FastAPI + async SQLAlchemy/SQLite, Alembic migrations, OpenAPI docs, structured logging, and Docker. The frontend (React + TypeScript + Bootstrap 5, responsive sidebar layout, Dashboard/Incidents/Reports/Settings pages) is also built, ahead of its original roadmap slot. Both services are containerized with separate **development** (hot reload) and **production** (built artifacts) Compose configs. See [`docs/features/`](docs/features/) for the full build log. The remaining target folder structure (agents, domain, MCP, guardrails, evaluation) is scaffolded but not yet implemented — see `ARCHITECTURE.md` for what's real vs. planned, including which frontend pages call backend endpoints that don't exist yet and why that's intentional rather than a bug.
 
 ## Project layout
 
@@ -20,6 +20,22 @@ scripts/     Dev/ops helper scripts
 See `ARCHITECTURE.md` → "Full project layout" for the complete folder-by-folder breakdown.
 
 ## Quickstart
+
+### Docker Compose (both services, dev or prod)
+
+**Development** (default — hot reload for both services):
+
+```bash
+docker compose up --build
+```
+
+**Production** (built artifacts — static frontend bundle via nginx, backend without reload/docs):
+
+```bash
+docker compose -f docker-compose.prod.yml up --build
+```
+
+Either way: backend at `http://localhost:8000`, frontend at `http://localhost:5173`. See `ARCHITECTURE.md` → "Containerization" for what differs between the two and why they're separate files.
 
 ### Backend — local (uv)
 
@@ -35,14 +51,6 @@ The API is served at `http://localhost:8000`:
 
 - Health check: `GET /api/v1/health`
 - Interactive docs: `/docs` (Swagger) and `/redoc` — disabled automatically when `APP_ENV=production`
-
-### Backend — Docker Compose
-
-```bash
-docker compose up --build
-```
-
-Serves the same API at `http://localhost:8000`.
 
 ### Database migrations (Alembic)
 
@@ -74,14 +82,6 @@ npm run dev
 ```
 
 Served at `http://localhost:5173`. Run the backend alongside it (above) to see live data instead of "unreachable"/"not available yet" states.
-
-### Frontend — Docker Compose
-
-```bash
-docker compose up --build
-```
-
-Runs both services together: frontend at `http://localhost:5173`, backend at `http://localhost:8000`.
 
 ### Frontend tests & linting
 

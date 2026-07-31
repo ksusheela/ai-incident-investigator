@@ -1,0 +1,60 @@
+# Production mode — used standalone, NOT layered on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.prod.yml up --build
+#
+# (Kept as a fully separate file rather than a docker-compose.override.yml
+# merged on top of the dev file: the two modes differ in build target,
+# exposed port, command, and volumes for the frontend service, and Compose
+# merges list fields like `ports` by concatenation rather than replacement —
+# layering would double-publish the frontend port instead of switching it.
+# A standalone file is the explicit, unambiguous alternative.)
+#
+# - Both services run their built artifacts: uvicorn without --reload,
+#   the frontend as a static bundle served by nginx. No source is mounted.
+# - The SQLite file lives in a named Docker volume (`backend_data`), not a
+#   host bind mount — a real managed volume, decoupled from host filesystem
+#   layout, is the appropriate choice once this isn't just local dev.
+# - APP_ENV=production also disables the backend's interactive API docs
+#   (/docs, /redoc) — see ARCHITECTURE.md -> "API documentation".
+
+services:
+  backend:
+    build:
+      context: ./backend
+      target: production
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: "AI Incident Investigator"
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      API_V1_PREFIX: /api/v1
+      DATABASE_URL: sqlite+aiosqlite:///./data/incident_investigator.db
+    volumes:
+      - backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      target: production
+      args:
+        # Baked into the static bundle at build time. Points at the
+        # backend's host-published port, since this is fetched from the
+        # browser on the host, not from inside the Docker network.
+        VITE_API_BASE_URL: http://localhost:8000/api/v1
+    ports:
+      - "5173:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  backend_data:

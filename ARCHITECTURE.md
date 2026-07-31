@@ -55,7 +55,21 @@ All runtime configuration is environment-variable driven via `Settings` (`pydant
 
 ## Containerization
 
-`backend/Dockerfile` builds a slim, non-root image using `uv` (installed via `COPY --from=ghcr.io/astral-sh/uv:latest`) for fast, reproducible dependency installation from the committed `uv.lock`. Dependencies are installed in a separate layer from application code so an app-only code change doesn't invalidate the dependency-install cache layer. `frontend/Dockerfile` is a two-stage build (Node to build the static bundle, nginx to serve it — see "Frontend" above for why). The root `docker-compose.yml` orchestrates both services, gives the backend a named volume for its SQLite file so data survives container recreation, and starts the frontend only after the backend reports healthy.
+Both Dockerfiles are **multi-stage with named `development` and `production` targets**, sharing a common `base` stage (dependency installation) so neither mode re-solves/re-downloads dependencies independently:
+
+- **`backend/Dockerfile`**: `base` installs `uv` (via `COPY --from=ghcr.io/astral-sh/uv:latest`) and syncs dependencies from the committed `uv.lock`, in a layer separate from application code so an app-only change doesn't invalidate the dependency-install cache. `development` includes the dev dependency group (pytest, ruff) and runs `uvicorn --reload`. `production` installs with `--no-dev`, copies only `src/` and `alembic.ini` (no tests), and runs uvicorn without reload. Both run as a non-root user.
+- **`frontend/Dockerfile`**: `base` runs `npm ci`. `development` runs the Vite dev server with HMR. A separate `build` stage runs `npm run build` (with `VITE_API_BASE_URL` baked in via a build `ARG`, since Vite env vars are compile-time for a production bundle), and `production` copies that build's `dist/` into an `nginx:1.27-alpine` image with an SPA-fallback `nginx.conf`.
+
+The **default target for a bare `docker build .`** (no `--target` flag) is `production` in both Dockerfiles, since that's the safer thing to produce if someone builds without specifying a mode.
+
+### Two Compose files, not one file plus an override
+
+- **`docker-compose.yml`** — development, and the default (`docker compose up --build`). Both services run with hot reload; `backend/src`, `backend/tests`, and `backend/alembic.ini` are bind-mounted from the host over the `development` image (so edits take effect without a rebuild — verified by editing a response field live and seeing it reflected immediately), and likewise `frontend/src`, `frontend/tests`, `frontend/public`, and `frontend/index.html`. The SQLite file is bind-mounted straight to `backend/data/` on the host (not a named volume), so it's inspectable the same way it is for a non-Docker `uv run` — no Docker-specific tooling needed to look at it.
+- **`docker-compose.prod.yml`** — production, used standalone: `docker compose -f docker-compose.prod.yml up --build`. Both services run their built artifacts (no source mounted), `APP_ENV=production` (which also disables the backend's `/docs`/`/redoc` — see "API documentation" above), and the SQLite file lives in a named Docker volume (`backend_data`) rather than a host path, since a real managed volume — decoupled from host filesystem layout — is the appropriate choice once this isn't just local dev.
+
+These are **two independent files, not a base file plus a `docker-compose.override.yml`** merged on top of it. Compose merges list-valued fields (like `ports`) by concatenation, not replacement; dev and prod differ in exactly those list-valued fields for the frontend service (different build target, different exposed port, different volumes), so layering one on top of the other would try to publish the frontend's port twice instead of switching it. Two self-contained files sidestep that merge-semantics footgun entirely, and as a side benefit each one is fully readable on its own — no mental diffing required to know what's actually running.
+
+Both are verified end-to-end: dev mode's hot reload was confirmed for both services (a live source edit appeared in the running response/served module without a rebuild); prod mode was confirmed to serve built artifacts only, with docs disabled and Alembic still working against the named volume.
 
 ## Testing
 
@@ -77,7 +91,7 @@ All runtime configuration is environment-variable driven via `Settings` (`pydant
 
 **Testing**: Vitest + React Testing Library, mirroring the backend's pytest setup. `tests/setup.ts` adds jest-dom matchers and a `matchMedia` polyfill (jsdom doesn't implement it, and `ThemeProvider` needs it for system-theme detection). Tests cover `useAsync`'s loading/success/error transitions, `Sidebar`'s nav links and active-route highlighting, and `ThemeProvider`'s theme toggle + persistence — logic, not just snapshots.
 
-**Docker**: multi-stage build — `node:24-alpine` builds the static bundle, `nginx:1.27-alpine` serves it with an SPA fallback (`try_files ... /index.html`) so client-side routes like `/incidents` don't 404 on refresh. Because `VITE_API_BASE_URL` is baked in at build time, it's passed as a Docker build `ARG` (`docker-compose.yml` sets it to `http://localhost:8000/api/v1` — the backend's *host*-published port, since the browser calls it directly, not from inside the Docker network).
+**Docker**: `development`/`production` targets (dev server with HMR vs. `node:24-alpine` build → `nginx:1.27-alpine` serve with an SPA fallback so client-side routes like `/incidents` don't 404 on refresh) — see "Containerization" below for the full dev/prod story, including why `VITE_API_BASE_URL` is a build `ARG` in production but a plain runtime env var in development.
 
 **Accepted dependency-audit findings** (`npm audit`, both dev/transitive, neither applicable here):
 
@@ -117,7 +131,7 @@ ai-incident-investigator/
 │   │   ├── unit/                       Tests for a single module in isolation (mocks at the boundary)
 │   │   ├── integration/                 Tests spanning modules (e.g. API -> service -> real test DB)
 │   │   └── e2e/                          Full agent-pipeline runs against a running app instance
-│   ├── Dockerfile                     [Feature 1, in use]
+│   ├── Dockerfile                     [in use] multi-stage: shared `base` -> `development` (uv sync w/ dev deps, --reload) / `production` (--no-dev, no reload)
 │   └── pyproject.toml                 [Feature 1, in use]
 ├── frontend/                          [in use] React + TypeScript + Bootstrap 5 client (Vite)
 │   ├── public/                         Static assets served as-is (currently empty)
@@ -131,7 +145,7 @@ ai-incident-investigator/
 │   │   ├── store/                           [in use] ThemeProvider + theme context (light/dark, Bootstrap 5.3 color modes)
 │   │   ├── styles/                           [in use] `custom.css` — small tweaks layered on Bootstrap's utility classes
 │   │   └── utils/                             Frontend-only utility functions (empty — nothing needed yet)
-│   ├── Dockerfile                      [in use] multi-stage: node build -> nginx serve, SPA fallback
+│   ├── Dockerfile                      [in use] multi-stage: shared `base` -> `development` (vite dev + HMR) / `build` -> `production` (nginx serve, SPA fallback)
 │   └── tests/                          [in use] Vitest + React Testing Library
 ├── docs/
 │   ├── features/                      [Feature 1, in use] One doc per completed feature: what was built, how to run/test it
@@ -141,7 +155,8 @@ ai-incident-investigator/
 ├── scripts/                          Dev/ops helper scripts (env setup, DB seeding, OpenAPI client generation)
 ├── .github/
 │   └── workflows/                    GitHub Actions CI/CD: backend lint+test, frontend lint+test, Docker image build, eval-suite runs
-├── docker-compose.yml                [in use] Local/dev orchestration of backend + frontend
+├── docker-compose.yml                [in use] Development mode (default) — hot reload, bind-mounted source, host-visible SQLite file
+├── docker-compose.prod.yml           [in use] Production mode (standalone, `-f` explicit) — built artifacts, named volume, no reload
 ├── ARCHITECTURE.md                   This file — living record of structural decisions
 ├── PROJECT_RULES.md                  Standing rules for how this repo is built
 └── README.md                         Project overview + quickstart
