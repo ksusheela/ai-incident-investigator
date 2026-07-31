@@ -1,0 +1,13 @@
+/* App-specific tweaks layered on top of Bootstrap 5's utility classes. */
+
+#sidebar {
+  transition: none;
+}
+
+@media (min-width: 992px) {
+  #sidebar.offcanvas-lg {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+  }
+}
