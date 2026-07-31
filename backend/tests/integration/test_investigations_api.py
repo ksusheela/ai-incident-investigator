@@ -49,6 +49,7 @@ async def test_investigation_endpoint_returns_no_incident(
     assert body["monitoring"]["incident_detected"] is False
     assert body["monitoring"]["severity"] == "none"
     assert body["report"] is None
+    assert body["incident_id"] is None  # clean logs are never persisted
 
 
 async def test_investigation_endpoint_rejects_empty_logs(app: FastAPI, client: AsyncClient) -> None:
@@ -147,6 +148,27 @@ async def test_export_endpoint_returns_downloadable_markdown_report(
     assert 'attachment; filename="incident-report.md"' in response.headers["content-disposition"]
     assert response.text.startswith("# Incident Report")
     assert "## Next Steps" in response.text
+
+
+async def test_malformed_llm_output_returns_a_clear_502_not_a_stack_trace(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """Root Cause receiving unparseable JSON from the LLM must surface as a
+    clean 502 via the `AgentOutputError` handler, not an unhandled 500 --
+    this exercises `main.py`'s `handle_agent_output_error` end-to-end,
+    which was previously only ever triggered directly against the agent
+    function in unit tests, never through the real API layer."""
+    app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(
+        responses=["this is not valid JSON"]
+    )
+
+    response = await client.post(
+        "/api/v1/investigations",
+        json={"logs": "ERROR checkout-service: 500\nERROR checkout-service: db timeout"},
+    )
+
+    assert response.status_code == 502
+    assert "Root Cause Agent" in response.json()["detail"]
 
 
 async def test_export_endpoint_rejects_when_no_incident_detected(

@@ -4,7 +4,10 @@ explained reasoning.
 
 Unlike Monitoring and Log Analysis, this genuinely needs LLM judgment —
 matching evidence to a plausible explanation and weighing how strongly it
-supports that explanation isn't a mechanical parsing task.
+supports that explanation isn't a mechanical parsing task. This is also
+the one agent augmented with Agent Skills: any skill whose trigger
+conditions match the raw logs (e.g. a Python traceback, a FastAPI/uvicorn
+error) has its guidance appended to the prompt as extra domain context.
 """
 
 import json
@@ -18,19 +21,26 @@ from app.agents.prompts.investigation_prompts import (
     ROOT_CAUSE_SYSTEM_PROMPT,
     build_root_cause_prompt,
 )
+from app.agents.skills.loader import SkillLoader
 from app.agents.state.investigation_state import InvestigationState, RootCauseResult
 from app.infrastructure.llm.provider import LLMProvider
 
 AGENT_NAME = "Root Cause Agent"
 
 
-def make_root_cause_agent(llm: LLMProvider) -> Callable[[InvestigationState], Awaitable[dict]]:
+def make_root_cause_agent(
+    llm: LLMProvider, skill_loader: SkillLoader
+) -> Callable[[InvestigationState], Awaitable[dict]]:
     async def root_cause_agent(state: InvestigationState) -> dict:
         assert state.log_analysis is not None, "root_cause_agent requires log_analysis"
 
+        matched_skills = skill_loader.match(state.logs)
+
         raw = await llm.complete(
             system=ROOT_CAUSE_SYSTEM_PROMPT,
-            prompt=build_root_cause_prompt(log_analysis=state.log_analysis),
+            prompt=build_root_cause_prompt(
+                log_analysis=state.log_analysis, matched_skills=matched_skills
+            ),
         )
         try:
             result = RootCauseResult.model_validate(json.loads(raw))

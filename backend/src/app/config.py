@@ -28,6 +28,24 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
 
+    # Filesystem root where confirmed-incident artifacts (uploaded log,
+    # full investigation JSON, generated report) are persisted, and which
+    # the Filesystem MCP server exposes as tools.
+    incident_artifacts_dir: str = "./data/incidents"
+
+    # Comma-separated browser origins allowed to call the API cross-origin
+    # (the frontend dev server and, in Docker, the browser-facing nginx
+    # port -- both default to http://localhost:5173, see docker-compose*.yml).
+    # Without this, the frontend's `fetch()` calls are blocked by the
+    # browser's same-origin policy even though a server-to-server curl
+    # would succeed -- CORS is enforced by the browser, not the server.
+    cors_allowed_origins: str = "http://localhost:5173"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """`cors_allowed_origins` split into a list, blanks removed."""
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -115,3 +115,9 @@ class InvestigationState(BaseModel):
 
     # Written by the Report Agent — the final human-readable deliverable.
     report: str | None = None
+
+    # Set by the service layer (not by any agent node) after the graph
+    # finishes, only when an incident was actually detected — see
+    # `investigation_service.run_investigation()`. Identifies the artifacts
+    # persisted to disk and readable via the Filesystem MCP server.
+    incident_id: str | None = None

@@ -31,6 +31,7 @@ from app.agents.nodes.monitoring_agent import monitoring_agent
 from app.agents.nodes.recommendation_agent import make_recommendation_agent
 from app.agents.nodes.report_agent import make_report_agent
 from app.agents.nodes.root_cause_agent import make_root_cause_agent
+from app.agents.skills.loader import SkillLoader
 from app.agents.state.investigation_state import InvestigationState
 from app.infrastructure.llm.provider import LLMProvider
 
@@ -45,19 +46,20 @@ def _route_after_monitoring(state: InvestigationState) -> str:
     return LOG_ANALYSIS if state.monitoring and state.monitoring.incident_detected else END
 
 
-def build_investigation_graph(llm: LLMProvider) -> CompiledStateGraph:
+def build_investigation_graph(llm: LLMProvider, skill_loader: SkillLoader) -> CompiledStateGraph:
     """Build and compile the incident-investigation graph for `llm`.
 
     A fresh graph is built per provider rather than shared globally, since
     each LLM-backed node closes over `llm` — see the `make_*_agent`
     factories. Monitoring and Log Analysis have no such dependency and are
-    wired in directly.
+    wired in directly. `skill_loader` is threaded to Root Cause, the one
+    agent augmented with Agent Skills — see `root_cause_agent.py`.
     """
     graph = StateGraph(InvestigationState)
 
     graph.add_node(MONITORING, monitoring_agent)
     graph.add_node(LOG_ANALYSIS, log_analysis_agent)
-    graph.add_node(ROOT_CAUSE, make_root_cause_agent(llm))
+    graph.add_node(ROOT_CAUSE, make_root_cause_agent(llm, skill_loader))
     graph.add_node(RECOMMENDATION, make_recommendation_agent(llm))
     graph.add_node(REPORT, make_report_agent(llm))
 

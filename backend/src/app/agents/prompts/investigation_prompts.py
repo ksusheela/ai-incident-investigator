@@ -13,6 +13,7 @@ deterministically from already-validated state (see
 """
 
 from app.agents.nodes.failure_patterns import render_catalog_for_prompt
+from app.agents.skills.models import Skill
 from app.agents.state.investigation_state import (
     LogAnalysisResult,
     RecommendationResult,
@@ -24,6 +25,9 @@ You are the Root Cause Agent in a production incident-investigation system.
 Given structured log analysis findings — extracted stack traces, repeated
 failure groups, and detected anomalies — analyze the evidence and
 hypothesize the single most likely root cause of the incident.
+
+If relevant domain expertise is provided below, use it to inform your
+hypothesis and reasoning, but don't force a fit if it doesn't apply.
 
 Check the evidence against this catalog of known failure patterns. If one
 clearly applies, name it in `matched_pattern`; if none clearly apply, use
@@ -41,8 +45,10 @@ hypothesis and why. `confidence_score` should reflect how directly the
 evidence supports the hypothesis, not just how severe the incident is."""
 
 
-def build_root_cause_prompt(*, log_analysis: LogAnalysisResult) -> str:
-    return (
+def build_root_cause_prompt(
+    *, log_analysis: LogAnalysisResult, matched_skills: list[Skill] | None = None
+) -> str:
+    prompt = (
         f"Affected components: {log_analysis.affected_components}\n"
         f"Time range: {log_analysis.time_range}\n"
         f"Stack traces: {[trace.model_dump() for trace in log_analysis.stack_traces]}\n"
@@ -50,6 +56,15 @@ def build_root_cause_prompt(*, log_analysis: LogAnalysisResult) -> str:
         f"{[failure.model_dump() for failure in log_analysis.repeated_failures]}\n"
         f"Anomalies: {log_analysis.anomalies}"
     )
+
+    if matched_skills:
+        skills_section = "\n\n".join(
+            f"### {skill.metadata.name} (v{skill.metadata.version})\n{skill.content}"
+            for skill in matched_skills
+        )
+        prompt += f"\n\nRelevant domain expertise:\n\n{skills_section}"
+
+    return prompt
 
 
 RECOMMENDATION_SYSTEM_PROMPT = """\

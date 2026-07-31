@@ -11,3 +11,72 @@
     height: 100vh;
   }
 }
+
+/* Status palette (dataviz skill, references/palette.md) -- global, and
+   fixed across light/dark by design (never themed), so severity badges
+   and the severity-distribution chart share exactly one set of colors. */
+:root {
+  --viz-status-neutral: #898781;
+  --viz-status-good: #0ca30c;
+  --viz-status-warning: #fab219;
+  --viz-status-serious: #ec835a;
+  --viz-status-critical: #d03b3b;
+}
+
+.badge-severity-none {
+  background-color: var(--viz-status-neutral);
+  color: #fff;
+}
+.badge-severity-low {
+  background-color: var(--viz-status-good);
+  color: #fff;
+}
+.badge-severity-medium {
+  background-color: var(--viz-status-warning);
+  color: #1a1a19;
+}
+.badge-severity-high {
+  background-color: var(--viz-status-serious);
+  color: #1a1a19;
+}
+.badge-severity-critical {
+  background-color: var(--viz-status-critical);
+  color: #fff;
+}
+
+/* Chart chrome (dataviz skill palette), scoped under .viz-root and
+   swapped via Bootstrap 5.3's [data-bs-theme] attribute -- the same
+   mechanism store/ThemeProvider.tsx already uses for the rest of the app. */
+.viz-root {
+  --viz-text-secondary: #52514e;
+  --viz-text-muted: #898781;
+  --viz-baseline: #c3c2b7;
+  --viz-sequential: #2a78d6;
+}
+
+[data-bs-theme="dark"] .viz-root {
+  --viz-text-secondary: #c3c2b7;
+  --viz-text-muted: #898781;
+  --viz-baseline: #383835;
+  --viz-sequential: #3987e5;
+}
+
+.viz-baseline {
+  stroke: var(--viz-baseline);
+  stroke-width: 1;
+}
+
+.viz-value-label {
+  fill: var(--viz-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.viz-axis-label {
+  fill: var(--viz-text-muted);
+  font-size: 11px;
+}
+
+.viz-tooltip {
+  min-height: 1.25rem;
+}

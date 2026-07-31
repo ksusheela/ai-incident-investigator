@@ -11,13 +11,19 @@ returns just the final Markdown report as a downloadable file
 (`text/markdown`, `Content-Disposition: attachment`) instead of the full
 JSON state — for a human who wants the report itself, not the underlying
 data.
+
+Confirmed incidents from any of these four are persisted via
+`artifact_store` (see `run_investigation()`), and become readable/
+manageable through the Filesystem MCP server mounted at `/mcp`.
 """
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from app.agents.skills.loader import SkillLoader, get_skill_loader
 from app.agents.state.investigation_state import InvestigationState
+from app.infrastructure.filesystem.artifact_store import IncidentArtifactStore, get_artifact_store
 from app.infrastructure.llm.factory import get_llm_provider
 from app.infrastructure.llm.provider import LLMProvider
 from app.services.investigation_service import run_investigation
@@ -30,7 +36,12 @@ _MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MiB
 class InvestigationRequest(BaseModel):
     """Request body: raw application log text to investigate."""
 
-    logs: str = Field(..., min_length=1, description="Raw application log text to analyze")
+    logs: str = Field(
+        ...,
+        min_length=1,
+        max_length=_MAX_UPLOAD_BYTES,
+        description="Raw application log text to analyze",
+    )
 
 
 async def _read_uploaded_logs(file: UploadFile) -> str:
@@ -79,25 +90,35 @@ def _report_as_markdown_download(report: str | None) -> Response:
 async def create_investigation(
     request: InvestigationRequest,
     llm: LLMProvider = Depends(get_llm_provider),
+    skill_loader: SkillLoader = Depends(get_skill_loader),
+    artifact_store: IncidentArtifactStore = Depends(get_artifact_store),
 ) -> InvestigationState:
     """Run the Monitoring -> Log Analysis -> Root Cause -> Recommendation -> Report
     pipeline over the given logs and return the final state.
 
     If the Monitoring Agent finds no incident, the response has
     `monitoring.incident_detected: false` and every later field is `null`.
+    Otherwise the response's `incident_id` identifies the persisted
+    artifacts, readable via the Filesystem MCP server.
     """
-    return await run_investigation(logs=request.logs, llm=llm)
+    return await run_investigation(
+        logs=request.logs, llm=llm, skill_loader=skill_loader, artifact_store=artifact_store
+    )
 
 
 @router.post("/investigations/upload", response_model=InvestigationState)
 async def create_investigation_from_file(
     file: UploadFile = File(..., description="A UTF-8 text log file to analyze"),
     llm: LLMProvider = Depends(get_llm_provider),
+    skill_loader: SkillLoader = Depends(get_skill_loader),
+    artifact_store: IncidentArtifactStore = Depends(get_artifact_store),
 ) -> InvestigationState:
     """Same pipeline as `POST /investigations`, accepting an uploaded log file
     instead of a JSON body."""
     logs = await _read_uploaded_logs(file)
-    return await run_investigation(logs=logs, llm=llm)
+    return await run_investigation(
+        logs=logs, llm=llm, skill_loader=skill_loader, artifact_store=artifact_store
+    )
 
 
 @router.post(
@@ -108,10 +129,14 @@ async def create_investigation_from_file(
 async def export_investigation_report(
     request: InvestigationRequest,
     llm: LLMProvider = Depends(get_llm_provider),
+    skill_loader: SkillLoader = Depends(get_skill_loader),
+    artifact_store: IncidentArtifactStore = Depends(get_artifact_store),
 ) -> Response:
     """Same pipeline as `POST /investigations`, returning only the final
     Markdown report as a downloadable `.md` file."""
-    result = await run_investigation(logs=request.logs, llm=llm)
+    result = await run_investigation(
+        logs=request.logs, llm=llm, skill_loader=skill_loader, artifact_store=artifact_store
+    )
     return _report_as_markdown_download(result.report)
 
 
@@ -123,9 +148,13 @@ async def export_investigation_report(
 async def export_investigation_report_from_file(
     file: UploadFile = File(..., description="A UTF-8 text log file to analyze"),
     llm: LLMProvider = Depends(get_llm_provider),
+    skill_loader: SkillLoader = Depends(get_skill_loader),
+    artifact_store: IncidentArtifactStore = Depends(get_artifact_store),
 ) -> Response:
     """Same pipeline as `POST /investigations/upload`, returning only the
     final Markdown report as a downloadable `.md` file."""
     logs = await _read_uploaded_logs(file)
-    result = await run_investigation(logs=logs, llm=llm)
+    result = await run_investigation(
+        logs=logs, llm=llm, skill_loader=skill_loader, artifact_store=artifact_store
+    )
     return _report_as_markdown_download(result.report)

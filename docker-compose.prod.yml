@@ -30,6 +30,10 @@ services:
       LOG_LEVEL: INFO
       API_V1_PREFIX: /api/v1
       DATABASE_URL: sqlite+aiosqlite:///./data/incident_investigator.db
+      # Browser-facing frontend origin (the host-published nginx port,
+      # not the container's internal 8080 -- see the frontend port
+      # mapping below), not the backend's own origin.
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
     volumes:
       - backend_data:/app/data
     healthcheck:

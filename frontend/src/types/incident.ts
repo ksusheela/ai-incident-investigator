@@ -1,15 +1,9 @@
-export type IncidentSeverity = "low" | "medium" | "high" | "critical";
-export type IncidentStatus = "open" | "investigating" | "resolved";
+/** Mirrors `IncidentSummary` in `backend/src/app/api/incidents.py`. */
+export type IncidentSeverity = "none" | "low" | "medium" | "high" | "critical";
 
-/**
- * Provisional shape — the backend does not expose an incidents endpoint yet
- * (planned for the log-upload/detection feature). This contract will be
- * finalized against the real API response when that lands.
- */
-export interface Incident {
-  id: string;
-  title: string;
+export interface IncidentSummary {
+  incident_id: string;
+  created_at: string;
   severity: IncidentSeverity;
-  status: IncidentStatus;
-  createdAt: string;
+  summary: string;
 }

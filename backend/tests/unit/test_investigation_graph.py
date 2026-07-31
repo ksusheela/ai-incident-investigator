@@ -6,6 +6,7 @@ import pytest
 
 from app.agents.errors import AgentOutputError
 from app.agents.graphs.investigation_graph import build_investigation_graph
+from app.agents.skills.loader import SkillLoader
 from app.agents.state.investigation_state import InvestigationState
 from tests.fakes import FakeLLMProvider
 
@@ -15,10 +16,16 @@ INCIDENT_LOGS = (
     "2026-07-31T14:02:05Z ERROR checkout-service: connection to payments-db timed out"
 )
 
+# The real bundled skill library — these graph-level tests use it as-is to
+# demonstrate genuine end-to-end integration; skill-specific behavior
+# (matching, prompt augmentation) has its own focused tests in
+# test_skill_loader.py and test_root_cause_agent.py.
+SKILL_LOADER = SkillLoader()
+
 
 async def test_stops_after_monitoring_when_no_incident_detected():
     llm = FakeLLMProvider(responses=[])  # no LLM-backed agent should run
-    graph = build_investigation_graph(llm)
+    graph = build_investigation_graph(llm, SKILL_LOADER)
 
     result = await graph.ainvoke(InvestigationState(logs=CLEAN_LOGS))
     state = InvestigationState.model_validate(result)
@@ -68,7 +75,7 @@ async def test_runs_full_pipeline_when_incident_detected():
         ),
     ]
     llm = FakeLLMProvider(responses=responses)
-    graph = build_investigation_graph(llm)
+    graph = build_investigation_graph(llm, SKILL_LOADER)
 
     result = await graph.ainvoke(InvestigationState(logs=INCIDENT_LOGS))
     state = InvestigationState.model_validate(result)
@@ -104,7 +111,7 @@ async def test_runs_full_pipeline_when_incident_detected():
 
 async def test_root_cause_agent_raises_on_unparseable_output():
     llm = FakeLLMProvider(responses=["not json at all"])
-    graph = build_investigation_graph(llm)
+    graph = build_investigation_graph(llm, SKILL_LOADER)
 
     with pytest.raises(AgentOutputError):
         await graph.ainvoke(InvestigationState(logs=INCIDENT_LOGS))

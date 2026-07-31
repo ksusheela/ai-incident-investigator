@@ -2,8 +2,9 @@ import { NavLink } from "react-router-dom";
 
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", end: true },
-  { to: "/incidents", label: "Incidents", end: false },
+  { to: "/incident-analysis", label: "Incident Analysis", end: false },
   { to: "/reports", label: "Reports", end: false },
+  { to: "/evaluation", label: "Evaluation", end: false },
   { to: "/settings", label: "Settings", end: false },
 ];
 
